@@ -1,0 +1,14 @@
+ARG ISAACLAB_BASE_IMAGE
+FROM ${ISAACLAB_BASE_IMAGE}
+
+ENV LABFLOW_PROJECT_ROOT=/workspace/labflow-dreamer \
+    ISAACLAB_ROOT=/workspace/isaaclab \
+    ACCEPT_EULA=Y \
+    PRIVACY_CONSENT=Y \
+    PYTHONUNBUFFERED=1
+
+USER root
+COPY . /workspace/labflow-dreamer
+RUN /workspace/labflow-dreamer/scripts/install_isaac_lab_extension.sh
+
+ENTRYPOINT ["/workspace/labflow-dreamer/aws_sagemaker/isaac_container_entrypoint.sh"]

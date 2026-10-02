@@ -1,17 +1,178 @@
-## My Project
+# SageMaker Dreamer Training for Isaac Lab
 
-TODO: Fill this README out!
+This project demonstrates one focused workflow: train a compact Dreamer-style
+agent against an Isaac Lab `DirectRLEnv` on Amazon SageMaker AI, download the
+completed model artifact, and run the learned policy in a local Isaac Lab
+simulation.
 
-Be sure to:
+This is an educational controller, not a certified controller for laboratory
+hardware.
 
-* Change the title in this README
-* Edit your repository description on GitHub
+## Architecture
 
-## Security
+```text
+Isaac Lab custom image in ECR
+        |
+        v
+SageMaker training job -- trains Dreamer in parallel Isaac environments
+        |
+        v
+S3 model.tar.gz -- contains labflow_isaac_dreamer.pt
+        |
+        v
+Local download -- validates and safely extracts the model artifact
+        |
+        v
+Isaac Lab policy runner -- deterministic learned-policy inference
+```
 
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+Training and inference use the same 20-value Isaac observation contract, eight
+discrete actions, task registration, and physics-backed JetBot environment.
 
-## License
+## Prerequisites
 
-This library is licensed under the MIT-0 License. See the LICENSE file.
+- An Isaac Lab 3.0+ container image with `/workspace/isaaclab` and the required
+  JetBot asset already available.
+- Docker, AWS CLI, `uv`, and AWS credentials configured through an IAM role or
+  AWS SSO. Do not store access keys in this repository.
+- An ECR repository, an SSE-KMS encrypted S3 bucket, and a least-privilege
+  SageMaker execution role.
+- A project virtual environment at `.venv/`.
 
+Install the local downloader dependency:
+
+```bash
+uv sync --extra sagemaker
+```
+
+## 1. Build and push the Isaac Lab image
+
+```bash
+AWS_REGION=us-east-1 \
+AWS_ACCOUNT_ID=123456789012 \
+ECR_REPOSITORY=labflow-dreamer \
+ISAACLAB_BASE_IMAGE=YOUR_APPROVED_ISAAC_LAB_IMAGE \
+  ./scripts/build_push_sagemaker_image.sh
+```
+
+The base image should be pinned by immutable digest for repeatable builds. It
+must contain the Isaac Lab checkout and all Isaac/PyTorch dependencies because
+the project packages are installed with `--no-deps`.
+
+## 2. Submit SageMaker training
+
+The launcher prints a dry-run request unless `--submit` is supplied. SageMaker
+requires an input channel, so the selected S3 prefix must contain at least one
+bootstrap object.
+
+```bash
+.venv/bin/python aws_sagemaker/launch_custom_job.py \
+  --image-uri 123456789012.dkr.ecr.us-east-1.amazonaws.com/labflow-dreamer:latest \
+  --role-arn arn:aws:iam::123456789012:role/SageMakerExecutionRole \
+  --region us-east-1 \
+  --input-s3-uri s3://YOUR_BUCKET/labflow/bootstrap \
+  --output-s3-uri s3://YOUR_BUCKET/labflow/output \
+  --checkpoint-s3-uri s3://YOUR_BUCKET/labflow/checkpoints \
+  --kms-key-id arn:aws:kms:us-east-1:123456789012:key/YOUR_KEY_ID \
+  --subnet-ids subnet-PRIVATE_ONE subnet-PRIVATE_TWO \
+  --security-group-ids sg-SAGEMAKER_TRAINING \
+  --owner YOUR_OWNER_TAG \
+  --submit
+```
+
+Training writes:
+
+```text
+/opt/ml/model/labflow_isaac_dreamer.pt
+/opt/ml/model/model_metadata.json
+/opt/ml/output/data/training.csv
+/opt/ml/checkpoints/training_state.pt
+```
+
+The final model is packaged by SageMaker into `model.tar.gz`. The checkpoint
+contains optimizer and replay state for Spot interruption recovery and is not
+the inference artifact.
+
+## 3. Download the completed model
+
+Use the training job name printed by the launcher. The downloader calls
+`DescribeTrainingJob`, uses the exact reported artifact URI, rejects unsafe tar
+entries, and verifies that the Isaac model is present.
+
+```bash
+.venv/bin/python aws_sagemaker/download_model.py \
+  --training-job-name YOUR_COMPLETED_JOB \
+  --region us-east-1 \
+  --output-dir artifacts/model
+```
+
+The role or identity running this command only needs
+`sagemaker:DescribeTrainingJob`, `s3:GetObject` for the specific artifact
+prefix, and `kms:Decrypt` for the specific KMS key when applicable.
+
+## 4. Run the downloaded policy in Isaac Lab
+
+Install the project into an existing Isaac Lab checkout:
+
+```bash
+ISAACLAB_ROOT=/path/to/IsaacLab \
+  ./scripts/install_isaac_lab_extension.sh
+```
+
+Run one deterministic policy environment with a visualizer:
+
+```bash
+ISAACLAB_ROOT=/path/to/IsaacLab \
+MODEL_PATH=artifacts/model/model/labflow_isaac_dreamer.pt \
+VISUALIZER=kit \
+  ./scripts/run_isaac_lab_policy.sh
+```
+
+Use `VISUALIZER=viser` for browser-based viewing over SSH. The runner validates
+the task and model dimensions, supplies Isaac action masks, and resets the
+Dreamer recurrent state whenever an environment terminates or truncates.
+
+## Environment and model
+
+The JetBot transports one logical plate through:
+
+```text
+load -> liquid handler -> incubator -> reader -> archive
+```
+
+Actions are `north`, `east`, `south`, `west`, `pick_up`, `drop_off`, `charge`,
+and `wait`. The world model learns observation, reward, and continuation
+predictions in an RSSM, while the actor and critic train on imagined latent
+trajectories.
+
+## Security and operations
+
+- Keep ECR and S3 private and encrypt both training output and checkpoints with
+  customer-managed KMS keys.
+- Run production jobs in private subnets with least-privilege security groups
+  and VPC endpoints for SageMaker API, ECR, S3, CloudWatch Logs, and STS.
+- Enable network isolation only after the Isaac and JetBot assets are fully
+  embedded in the image. It is enabled by default; use
+  `--no-network-isolation` only when runtime asset retrieval is unavoidable.
+- Use managed Spot training with the checkpoint S3 prefix when interruption is
+  acceptable.
+- Apply `Project`, `Environment`, and `Owner` tags and configure AWS Budgets
+  before launching GPU instances.
+- Never run a learned policy directly against laboratory hardware without a
+  deterministic safety layer and emergency-stop controls.
+
+AWS references:
+
+- [SageMaker training output](https://docs.aws.amazon.com/sagemaker/latest/dg/your-algorithms-training-algo-output.html)
+- [SageMaker model artifacts](https://docs.aws.amazon.com/sagemaker/latest/APIReference/API_ModelArtifacts.html)
+- [AWS Well-Architected ML security](https://docs.aws.amazon.com/wellarchitected/latest/machine-learning-lens/mlsec03-bp02.html)
+
+## Repository layout
+
+```text
+aws_sagemaker/          SageMaker launcher, entrypoint, and artifact downloader
+docker/                 Isaac Lab SageMaker image
+isaac_lab/              Isaac training, inference, task, and robot definition
+scripts/                Image build, Isaac installation, and inference wrappers
+src/labflow_dreamer/    Dreamer agent, RSSM models, and replay buffer
+```
