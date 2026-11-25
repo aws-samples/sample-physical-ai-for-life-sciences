@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AWS_REGION="us-east-1"
 AWS_ACCOUNT_ID="937566678454"
 ECR_REPOSITORY="labflow-dreamer"
-ISAACLAB_BASE_IMAGE="nvcr.io/nvidia/isaac-lab:3.0.0-beta1"
+ISAACLAB_BASE_IMAGE="nvcr.io/nvidia/isaac-lab:3.0.0"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
